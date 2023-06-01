@@ -1211,12 +1211,81 @@ class LLMAnalysis:
         }
         return total_latency, total_breakdown
 
-    # def get_latency_bwd_per_layer_attn(
-    #     self,
-    #     batch_size: int,
-    #     seq_len: int,
-    #     activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
-    # ) -> float:
+    def get_latency_recompute_per_layer(
+        self,
+        batch_size: int,
+        seq_len: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        tp_size = self.parallelism_config.tp_size
+
+        if activation_recomputation == ActivationRecomputation.NONE:
+            return 0
+        elif activation_recomputation == ActivationRecomputation.SELECTIVE:
+            num_flops_selective_recompute_attn = (
+                4 * batch_size * seq_len**2 * self.model_config.hidden_dim
+            )
+            compute_latency = (
+                num_flops_selective_recompute_attn
+                / tp_size
+                / (self.get_TFLOPS_per_gpu() * 10**12)
+            )
+            # Actually the original repo didn't give a very accurate estimation on memory access amount.
+            # It is actually a very coarse lower bound.
+            # So, even if the author does consider memory-bound scenarios, it's not very accurate after all.
+            logger.warning(
+                "In rematerialization, XCH believes it is computation-bound."
+            )
+            return compute_latency
+        elif activation_recomputation == ActivationRecomputation.FULL:
+            (
+                latency_fwd_per_layer,
+                _,
+            ) = self.get_latency_fwd_per_layer(
+                batch_size,
+                seq_len,
+                is_inference=False,
+                activation_recomputation=activation_recomputation,
+                layernorm_dtype_bytes=layernorm_dtype_bytes,
+            )
+            return latency_fwd_per_layer
+        else:
+            logger.warning("Unexpected activation recomputation type")
+            raise NotImplementedError
+
+    def get_latency_bwd_per_layer_attn(
+        self,
+        batch_size: int,
+        seq_len: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        return 2 * self.get_latency_fwd_per_layer_attn(
+            batch_size, seq_len, activation_recomputation.FULL, layernorm_dtype_bytes
+        )
+    
+    def get_latency_bwd_per_layer_mlp(
+        self,
+        batch_size: int,
+        seq_len: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        return 2 * self.get_latency_fwd_per_layer_mlp(
+            batch_size, seq_len, activation_recomputation.FULL, layernorm_dtype_bytes
+        )
+    
+    def get_latency_bwd_per_layer_layernorm(
+        self,
+        batch_size: int,
+        seq_len: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        return 2 * self.get_latency_fwd_per_layer_layernorm(
+            batch_size, seq_len, activation_recomputation.FULL, layernorm_dtype_bytes
+        )
 
     def get_latency_bwd_per_layer(
         self,
