@@ -1211,6 +1211,60 @@ class LLMAnalysis:
         }
         return total_latency, total_breakdown
 
+    def get_latency_fwd_pp_comm(
+        self,
+        batch_size: int, 
+        seq_len: int,
+        dtype_bytes: int,
+    ) -> float:
+        """ Get Latency for inter-node transmission latency induced by pipeline parallelism.
+        According to "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM",
+        This requires sending 1 copy of activation tensor through infiniband,
+        and a gather collective through NVLink.
+        """
+        elems = (
+            batch_size
+            * seq_len
+            * self.model_config.hidden_dim
+        )
+        inter_node_latency = (
+            elems
+            * dtype_bytes
+            / (self.gpu_config.inter_node_bandwidth_in_GB_per_sec * 10**9)
+        )
+        
+        tp_size = self.parallelism_config.tp_size
+        elems_per_gather = (
+            elems
+            * (tp_size - 1)
+            / tp_size
+        )
+        latency_per_gather = (
+            elems_per_gather
+            * dtype_bytes
+            / (self.gpu_config.intra_node_bandwidth_in_GB_per_sec * 10**9)
+        )
+        intra_node_latency = max(
+            latency_per_gather,
+            self.gpu_config.intra_node_min_message_latency,
+        )
+
+        return (
+            inter_node_latency
+            + intra_node_latency
+        )
+
+    def get_latency_bwd_pp_comm(
+        self,
+        batch_size: int, 
+        seq_len: int,
+        dtype_bytes: int,
+    ) -> float:
+        """ Gradient has the same shape as activation tensor.
+        """
+        return self.get_latency_fwd_pp_comm(batch_size, seq_len, dtype_bytes)
+        
+
     def get_latency_per_iter(
         self,
         batch_size: int,
@@ -1265,8 +1319,8 @@ class LLMAnalysis:
         latency_fwd_per_chunk = latency_fwd_per_layer * num_layers_per_gpu
         latency_bwd_per_chunk = latency_bwd_per_layer * num_layers_per_gpu
 
-        latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len)  # TODO: implement this method
-        latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len)  # TODO: implement this method
+        latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)  # TODO: implement this method
+        latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)  # TODO: implement this method
         latency_dp_comm = self.get_latency_dp_comm()                             # TODO: implement this method
         latency_embed_sync = self.get_latency_embed_sync()                       # TODO: implement this method
 
