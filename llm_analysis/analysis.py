@@ -1490,18 +1490,31 @@ class LLMAnalysis:
         (
             latency_bwd_per_layer,
             bwd_breakdown_per_layer,
-        ) = self.get_latency_bwd_per_layer(  # TODO: implement this method
+        ) = self.get_latency_bwd_per_layer(
             batch_size,
             seq_len,
             activation_recomputation,
             layernorm_dtype_bytes
         )
 
-        latency_fwd_per_chunk = latency_fwd_per_layer * num_layers_per_gpu
-        latency_bwd_per_chunk = latency_bwd_per_layer * num_layers_per_gpu
+        latency_recompute_per_layer = (
+            self.get_latency_recompute_per_layer(
+                batch_size,
+                seq_len,
+                activation_recomputation,
+                layernorm_dtype_bytes
+            )
+        )
 
-        # TODO: consider the overhead of embedding operation
-        # I expect this impact to be small, but let's just add it to the interface alright?
+        latency_fwd_input_embedding = self.get_latency_fwd_input_embedding(
+            batch_size,
+            seq_len,
+            dtype_bytes=self.dtype_config.embedding_bits / BITS_PER_BYTE,
+        )
+
+        latency_fwd_output_embedding_loss = (
+            self.get_latency_fwd_output_embedding_loss(batch_size, seq_len)
+        )
 
         latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
         latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
@@ -1509,13 +1522,17 @@ class LLMAnalysis:
         latency_embed_sync = self.get_latency_embed_sync(self.dtype_config.embedding_bits / BITS_PER_BYTE)
 
         pipeline_analyzer = PipelineAnalyzer(
-            latency_fwd_per_chunk,
-            latency_bwd_per_chunk,
+            latency_fwd_per_layer,
+            latency_bwd_per_layer,
+            latency_recompute_per_layer,
+            latency_fwd_input_embedding,
+            latency_fwd_output_embedding_loss,
             latency_fwd_pp_comm,
             latency_bwd_pp_comm,
             latency_dp_comm,
             latency_embed_sync,
             gradient_accumulation_step,
+            num_interleaved_stages = 1,
         )
 
         pipeline_latency = pipeline_analyzer.get_pipeline_latency()
