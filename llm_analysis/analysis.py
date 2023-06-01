@@ -1211,6 +1211,59 @@ class LLMAnalysis:
         }
         return total_latency, total_breakdown
 
+    # def get_latency_bwd_per_layer_attn(
+    #     self,
+    #     batch_size: int,
+    #     seq_len: int,
+    #     activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+    # ) -> float:
+
+    def get_latency_bwd_per_layer(
+        self,
+        batch_size: int,
+        seq_len: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        latency_bwd_per_layer_attn = self.get_latency_bwd_per_layer_attn(
+            batch_size, seq_len, activation_recomputation
+        )
+
+        latency_bwd_per_layer_mlp = self.get_latency_bwd_per_layer_mlp(
+            batch_size, seq_len, activation_recomputation
+        )
+
+        latency_bwd_per_layer_layernorm = (
+            self.get_latency_bwd_per_layer_layernorm(
+                batch_size,
+                seq_len,
+                activation_recomputation,
+                layernorm_dtype_bytes,
+            )
+        )
+
+        latency_bwd_per_layer_tp_comm = self.get_latency_bwd_per_layer_tp_comm(
+            batch_size,
+            seq_len,
+            self.dtype_config.activation_bits / BITS_PER_BYTE,
+        )
+
+        latency_per_layer = (
+            latency_bwd_per_layer_attn
+            + latency_bwd_per_layer_mlp
+            + 2 * latency_bwd_per_layer_layernorm
+            + 2 * latency_bwd_per_layer_tp_comm
+        )
+
+        breakdown_per_layer = {
+            "attn": latency_bwd_per_layer_attn,
+            "mlp": latency_bwd_per_layer_mlp,
+            "layernorm": 2 * latency_bwd_per_layer_layernorm,
+            "tp_comm": 2 * latency_bwd_per_layer_tp_comm,
+        }
+
+        return latency_per_layer, breakdown_per_layer
+
     def get_latency_fwd_pp_comm(
         self,
         batch_size: int, 
@@ -1378,6 +1431,9 @@ class LLMAnalysis:
         latency_fwd_per_chunk = latency_fwd_per_layer * num_layers_per_gpu
         latency_bwd_per_chunk = latency_bwd_per_layer * num_layers_per_gpu
 
+        # TODO: consider the overhead of embedding operation
+        # I expect this impact to be small, but let's just add it to the interface alright?
+
         latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
         latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
         latency_dp_comm = self.get_latency_dp_comm(num_layers_per_gpu, self.dtype_config.weight_bits / BITS_PER_BYTE)
@@ -1400,7 +1456,6 @@ class LLMAnalysis:
             pipeline_latency,
             pipeline_latency_breakdown,
         )
-
 
     def print_config(self, name="Training Configs") -> None:
         config_str = f"\n{name.center(PRINT_LINE_WIDTH, '-')}\n"
