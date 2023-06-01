@@ -1218,6 +1218,7 @@ class LLMAnalysis:
         dtype_bytes: int,
     ) -> float:
         """ Get Latency for inter-node transmission latency induced by pipeline parallelism.
+        Only consider the latency between consecutive PP stages.
         According to "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM",
         This requires sending 1 copy of activation tensor through infiniband,
         and a gather collective through NVLink.
@@ -1263,7 +1264,65 @@ class LLMAnalysis:
         """ Gradient has the same shape as activation tensor.
         """
         return self.get_latency_fwd_pp_comm(batch_size, seq_len, dtype_bytes)
+
+    def get_latency_dp_comm(
+        self,
+        num_layers_per_gpu: int,
+        dtype_bytes: int,
+    ) -> float:
+        """ Get inter-node communication latency induced by data parallelism.
+        Only consider weight synchronization within a DP group.
+        Since Ring-AllReduce = RingReduceScatter + RingAllGather, the amount of transmission remains the same.
+        """
+        dp_size = self.parallelism_config.dp_size
+        elems_weight_per_gpu = (
+            self.get_num_params_per_layer()
+            * num_layers_per_gpu
+        )
         
+        elems_per_cc = (
+            2
+            * elems_weight_per_gpu
+            * (dp_size - 1)
+            / dp_size
+        )
+        latency_per_cc = {
+            elems_per_cc
+            * dtype_bytes
+            / (self.gpu_config.inter_node_bandwidth_in_GB_per_sec * 10**9)
+        }
+        return latency_per_cc
+
+    def get_latency_embed_sync(
+        self,
+        dtype_bytes: int,
+        fused: bool = False,
+    ) -> float:
+        dp_size = self.parallelism_config.dp_size
+        elems_embed = self.get_num_params_embedding(shared_embedding=True)
+
+        if not fused:
+            elems_per_cc = (
+                2
+                * elems_embed
+                * (dp_size - 1)
+                / dp_size
+            ) + (
+                elems_embed  # 2 * 1/2 = 1
+            )
+        else:
+            elems_per_cc = (
+                2
+                * elems_embed
+                * (2 * dp_size - 1)
+                / (2 * dp_size)
+            )
+        latency_per_cc = (
+            elems_per_cc
+            * dtype_bytes
+            / (self.gpu_config.inter_node_bandwidth_in_GB_per_sec * 10**9)
+        )
+        return latency_per_cc
 
     def get_latency_per_iter(
         self,
@@ -1319,10 +1378,10 @@ class LLMAnalysis:
         latency_fwd_per_chunk = latency_fwd_per_layer * num_layers_per_gpu
         latency_bwd_per_chunk = latency_bwd_per_layer * num_layers_per_gpu
 
-        latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)  # TODO: implement this method
-        latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)  # TODO: implement this method
-        latency_dp_comm = self.get_latency_dp_comm()                             # TODO: implement this method
-        latency_embed_sync = self.get_latency_embed_sync()                       # TODO: implement this method
+        latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
+        latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len, self.dtype_config.activation_bits / BITS_PER_BYTE)
+        latency_dp_comm = self.get_latency_dp_comm(num_layers_per_gpu, self.dtype_config.weight_bits / BITS_PER_BYTE)
+        latency_embed_sync = self.get_latency_embed_sync(self.dtype_config.embedding_bits / BITS_PER_BYTE)
 
         pipeline_analyzer = PipelineAnalyzer(
             latency_fwd_per_chunk,
