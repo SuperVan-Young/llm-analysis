@@ -1211,6 +1211,84 @@ class LLMAnalysis:
         }
         return total_latency, total_breakdown
 
+    def get_latency_per_iter(
+        self,
+        batch_size: int,
+        seq_len: int,
+        gradient_accumulation_step: int,
+        num_layers_per_gpu: int,
+        is_inference: bool = True,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> tuple:
+        """ Get latency per iteration considering 3D parallelism latency breakdown.
+
+        Args:
+            batch_size (int): batch size
+            seq_len (int): sequence length
+            gradient_accumulation_step (int): gradient accumulation step,
+            num_layers_per_gpu (int): number of layers per GPU
+            is_inference (bool, optional): whether it is inference or not. Defaults to True.
+            activation_recomputation (ActivationRecomputation, optional): activation recomputation strategy. Defaults to ActivationRecomputation.NONE.
+            layernorm_dtype_bytes (int, optional): number of bytes in the data type for the layernorm activations. Defaults to BYTES_FP32. Often has to be FP32 in training to maintain model accuracy.
+            breakdown_prefix (str, optional): prefix for the breakdown dict keys. Defaults to "".
+        Returns:
+            tuple: a tuple of the latency in seconds for a complete iteration of the transformer and its breakdown dict
+        """
+        if not is_inference:
+            logger.critical(
+                "XCH hasn't considered inference yet!"
+            )
+            raise NotImplementedError
+
+        (
+            latency_fwd_per_layer,
+            fwd_breakdown_per_layer,
+        ) = self.get_latency_fwd_per_layer(
+            batch_size,
+            seq_len,
+            is_inference,
+            activation_recomputation,
+            layernorm_dtype_bytes
+        )
+
+        (
+            latency_bwd_per_layer,
+            bwd_breakdown_per_layer,
+        ) = self.get_latency_bwd_per_layer(  # TODO: implement this method
+            batch_size,
+            seq_len,
+            activation_recomputation,
+            layernorm_dtype_bytes
+        )
+
+        latency_fwd_per_chunk = latency_fwd_per_layer * num_layers_per_gpu
+        latency_bwd_per_chunk = latency_bwd_per_layer * num_layers_per_gpu
+
+        latency_fwd_pp_comm = self.get_latency_fwd_pp_comm(batch_size, seq_len)  # TODO: implement this method
+        latency_bwd_pp_comm = self.get_latency_bwd_pp_comm(batch_size, seq_len)  # TODO: implement this method
+        latency_dp_comm = self.get_latency_dp_comm()                             # TODO: implement this method
+        latency_embed_sync = self.get_latency_embed_sync()                       # TODO: implement this method
+
+        pipeline_analyzer = PipelineAnalyzer(
+            latency_fwd_per_chunk,
+            latency_bwd_per_chunk,
+            latency_fwd_pp_comm,
+            latency_bwd_pp_comm,
+            latency_dp_comm,
+            latency_embed_sync,
+            gradient_accumulation_step,
+        )
+
+        pipeline_latency = pipeline_analyzer.get_pipeline_latency()
+        pipeline_latency_breakdown = pipeline_analyzer.get_pipeline_latency_breakdown()
+
+        return (
+            pipeline_latency,
+            pipeline_latency_breakdown,
+        )
+
+
     def print_config(self, name="Training Configs") -> None:
         config_str = f"\n{name.center(PRINT_LINE_WIDTH, '-')}\n"
         config_str += f"{pformat(self.model_config)}\n"
@@ -1892,9 +1970,27 @@ class LLMAnalysis:
             mp_size * self.get_TFLOPS_per_gpu() * 1e12
         )
 
-        latency_per_iter = (
-            latency_per_micro_batch * gradient_accumulation_steps
+        # latency_per_iter = (
+        #     latency_per_micro_batch * gradient_accumulation_steps
+        # )
+
+        # XCH:
+        # Instead of using MFU (originally given by flops_efficiency) to calculate latency_per_iter directly,
+        # We go into detail and use latency breakdown to constitute the complete latency_per_iter.
+        # In this case, flops_efficiency no longer stands for MFU, i.e. it doesn't take transmission overhead into consideration.
+        logger.warning(
+            "Using breakdown latency to calculate latency_per_iter ..."
         )
+        latency_per_iter = self.get_latency_per_iter(
+            batch_size_per_gpu,
+            seq_len,
+            gradient_accumulation_steps,
+            num_layers_per_gpu,
+            is_inference=False,
+            activation_recomputation=activation_recomputation,
+            layernorm_dtype_bytes=layernorm_dtype_bytes,
+        )
+
 
         logger.info(
             "latency_per_micro_batch:"
