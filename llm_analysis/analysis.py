@@ -33,6 +33,7 @@ from llm_analysis.config import (
 from llm_analysis.constant import *
 from llm_analysis.logger import logger
 from llm_analysis.utils import _latency_to_string, _num_to_string, within_range
+from llm_analysis.pipeline import PipelineAnalyzer
 
 
 class ActivationRecomputation(Enum):
@@ -1538,8 +1539,7 @@ class LLMAnalysis:
             num_interleaved_stages = 1,
         )
 
-        pipeline_latency = pipeline_analyzer.get_pipeline_latency()
-        pipeline_latency_breakdown = pipeline_analyzer.get_pipeline_latency_breakdown()
+        pipeline_latency, pipeline_latency_breakdown = pipeline_analyzer.get_pipeline_latency()
 
         return (
             pipeline_latency,

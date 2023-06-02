@@ -67,16 +67,14 @@ class PipelineAnalyzer():
             )
             raise RuntimeError
 
-        self.graph = self.build_dependency_graph()
-
     def get_batch_name(self, batch_id: int, device_id: int, is_fwd: bool) -> str:
         """ Get name of batch instance on given device
         """
         prefix = "fwd" if is_fwd else "bwd"
         return f"{prefix}_b{batch_id}_d{device_id}"
 
-    def get_latency_exec_micro_batch(self, batch_id: int, device_id: int, is_fwd: bool) -> float:
-        """ Get the latency of executing a pipeline stage of batch #batch_id on device #device_id.
+    def get_latency_exec_model_chunk(self, device_id: int, is_fwd: bool) -> float:
+        """ Get the latency of executing a pipeline stage on device #device_id.
         """
         if is_fwd:
             latency = self.latency_fwd_per_layer * self.num_layers_per_chunk
@@ -110,13 +108,13 @@ class PipelineAnalyzer():
             succ_node = nodes[idx + 1]
             graph.add_edge(prev_node, succ_node, latency=latency)
       
-
     def build_dependency_graph(self) -> nx.DiGraph:
         """ Build a dependency graph between micro-batches.
         This includes intra-device dependency induced by instruction sequence,
         as well as inter-device dependency induced by pipeline parallelism.
         """
         G = nx.DiGraph()
+        G.is_analyzed = False
         
         for (
             batch_id,
@@ -129,8 +127,9 @@ class PipelineAnalyzer():
         ):
             G.add_node(
                 self.get_batch_name(batch_id, device_id, is_fwd),
-                latency=self.get_latency_exec_micro_batch(batch_id, device_id, is_fwd),
+                latency=self.get_latency_exec_model_chunk(device_id, is_fwd),
                 start_time=0,
+                end_time=None,
                 critical_path_pred=None,
             )
 
@@ -196,3 +195,71 @@ class PipelineAnalyzer():
             self.add_dependency_chain(G, control_chain, 0)
         
         return G
+    
+    def analyze_dependency_graph(self, graph: nx.DiGraph) -> None:
+        G = graph
+
+        for u in nx.algorithms.dag.topological_sort(G):
+            udata = G.nodes[u]
+            udata['end_time'] = udata['start_time'] + udata['latency']
+            for v in G.successors(u):
+                edata = G.edges[u][v]
+                vdata = G.nodes[v]
+                new_start_time = udata['end'] + edata['latency']
+                if new_start_time > vdata['start_time']:
+                    vdata['critical_path_pred'] = u
+                    vdata['start_time'] = new_start_time
+
+        G.is_analyzed = True
+
+    def get_latency_of_critical_path(self, graph: nx.DiGraph) -> float:
+        """ Get the maximum end time of dependency graph.
+        """
+        G = graph
+        assert G.is_analyzed
+
+        max_end_time = 0
+        for n, ndata in G.nodes(data=True):
+            max_end_time = max(
+                max_end_time,
+                ndata['end_time'],
+            )
+        return max_end_time
+    
+    def get_pipeline_latency(self) -> tuple:
+        """ Get pipeline latency and its breakdown.
+        Returns:
+            A tuple of pipeline latency and breakdown
+        """
+        G = self.build_dependency_graph()
+        self.analyze_dependency_graph(G)
+
+        latency_dependency_graph = self.get_latency_of_critical_path(G)
+
+        total_latency = (
+            latency_dependency_graph 
+            + self.latency_dp_comm
+            + self.latency_embed_sync
+        )
+
+        logger.info(
+            "Here we only consider inter-node communication."
+            " Therefore, 'compute' here refers to intra-node computation"
+            " as well as tp-comm latency."
+        )
+        breakdown = {
+            'compute': (
+                (self.latency_fwd_per_layer + self.latency_bwd_per_layer)
+                * self.num_layers_per_gpu
+                * self.gradient_accumulation_step
+            ), # here we ignore embedding for simplicity
+            'pp_comm': (
+                (self.latency_fwd_pp_comm + self.latency_bwd_pp_comm)
+                * (self.pp_size - 1)
+            ),  # here we only consider pp comm that can never be overlapped, i.e. prologue and epilogue
+            'dp_comm': self.latency_dp_comm,
+            'embed_sync': self.latency_embed_sync,
+        }
+
+        return total_latency, breakdown
+    
