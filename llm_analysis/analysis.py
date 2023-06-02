@@ -1521,6 +1521,7 @@ class LLMAnalysis:
         latency_dp_comm = self.get_latency_dp_comm(num_layers_per_gpu, self.dtype_config.weight_bits / BITS_PER_BYTE)
         latency_embed_sync = self.get_latency_embed_sync(self.dtype_config.embedding_bits / BITS_PER_BYTE)
 
+        pp_size = self.parallelism_config.pp_size
         pipeline_analyzer = PipelineAnalyzer(
             latency_fwd_per_layer,
             latency_bwd_per_layer,
@@ -1531,7 +1532,9 @@ class LLMAnalysis:
             latency_bwd_pp_comm,
             latency_dp_comm,
             latency_embed_sync,
+            pp_size,
             gradient_accumulation_step,
+            num_layers_per_gpu,
             num_interleaved_stages = 1,
         )
 
