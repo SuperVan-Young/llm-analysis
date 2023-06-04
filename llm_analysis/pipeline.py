@@ -1,6 +1,9 @@
 
 import networkx as nx
 from itertools import product
+import re
+import plotly.figure_factory as ff
+import pandas as pd
 
 from llm_analysis.logger import logger
 
@@ -66,9 +69,31 @@ class PipelineAnalyzer():
             microbatch_group_size = self.pp_size * self.num_interleaved_stages
             microbatch_group_id = microbatch_id // microbatch_group_size
             microbatch_id_in_group = microbatch_id % microbatch_group_size
-            virtual_pipeline_stage_id = microbatch_group_id // self.pp_size
+            virtual_pipeline_stage_id = microbatch_id_in_group // self.pp_size
             actual_microbatch_id = microbatch_group_id * self.pp_size + (microbatch_id_in_group % self.pp_size)
             return f"{prefix}_b{actual_microbatch_id}_d{device_id}_v{virtual_pipeline_stage_id}"
+        
+    def parse_batch_name(self, batch_name: str) -> dict:
+        if self.num_interleaved_stages == 1:
+            pattern = re.compile(r"^(\w+)_b(\d+)_d(\d+)$")
+            match = pattern.match(batch_name)
+            assert match
+            result = {
+                'is_fwd': match.group(1) == 'fwd',
+                'batch_id': int(match.group(2)),
+                'device_id': int(match.group(3)),
+            }
+        else:
+            pattern = re.compile(r"^(\w+)_b(\d+)_d(\d+)_v(\d+)$")
+            match = pattern.match(batch_name)
+            assert match
+            result = {
+                'is_fwd': match.group(1) == 'fwd',
+                'batch_id': int(match.group(2)),
+                'device_id': int(match.group(3)),
+                'virtual_stage_id': int(match.group(4)),
+            }
+        return result
 
     def get_latency_exec_model_chunk(self, device_id: int, is_fwd: bool) -> float:
         """ Get the latency of executing a pipeline stage on device #device_id.
@@ -291,6 +316,16 @@ class PipelineAnalyzer():
             )
 
         return G.nodes[last_node]['end_time']
+    
+    def plot_microbatch_gantt_graph(self, graph: nx.DiGraph, save_path: str = None) -> None:
+        """ Plot the Gantt graph of microbatch execution.
+        """
+        G = graph
+        assert G.is_analyzed
+
+        df = pd.DataFrame(columns=['Task', 'Start', 'Finish', 'Stage'])
+        for node, ndata in G.nodes(data=True):
+            pass
     
     def get_pipeline_latency(self) -> tuple:
         """ Get pipeline latency and its breakdown.
