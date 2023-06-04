@@ -2,7 +2,7 @@
 import networkx as nx
 from itertools import product
 import re
-import plotly.figure_factory as ff
+import matplotlib.pyplot as plt
 import pandas as pd
 
 from llm_analysis.logger import logger
@@ -323,9 +323,30 @@ class PipelineAnalyzer():
         G = graph
         assert G.is_analyzed
 
-        df = pd.DataFrame(columns=['Task', 'Start', 'Finish', 'Stage'])
+        fig, ax = plt.subplots()
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Micro Batch')
+        ax.set_ylim(0, self.pp_size - 1)
+        ax.invert_yaxis()
+        
+        fwd_colormap = plt.cm.get_cmap('viridis')
+        bwd_colormap = plt.cm.get_cmap('coolwarm')
+        
         for node, ndata in G.nodes(data=True):
-            pass
+            parsed_name = self.parse_batch_name(node)
+            start_time = ndata['start_time']
+            end_time = ndata['end_time']
+            device_id = parsed_name['device_id']
+            virtual_stage_id = parsed_name.get('virtual_stage_id', 0)
+            colormap = fwd_colormap if parsed_name['is_fwd'] else bwd_colormap
+            color = colormap(virtual_stage_id / self.num_interleaved_stages)
+            ax.broken_barh([(start_time, end_time-start_time)], (device_id, 0.5), color=color, edgecolor='black')
+
+        ax.set_title("Microbatch execution Gantt chart")
+
+        if save_path:
+            plt.savefig(save_path)
+        plt.show()
     
     def get_pipeline_latency(self) -> tuple:
         """ Get pipeline latency and its breakdown.
