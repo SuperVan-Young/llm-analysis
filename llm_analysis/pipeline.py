@@ -172,18 +172,7 @@ class PipelineAnalyzer():
             ]
             self.add_dependency_chain(G, bwd_transmission_chain, self.latency_bwd_pp_comm)
 
-        # intra-node dependency
-        
-        # The last device could start 1F1B schedule directly
-        output_device_id = self.pp_size - 1
-        output_control_chain = []
-        for batch_id in range(self.total_num_microbatches):
-            for is_fwd in (True, False):
-                output_control_chain.append(
-                    self.get_batch_name(batch_id, output_device_id, is_fwd)
-                )
-        self.add_dependency_chain(G, output_control_chain, 0)
-        
+        # intra-node dependency    
         for device_id in range(self.pp_size - 1):
             control_chain = []
 
