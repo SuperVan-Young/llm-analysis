@@ -102,6 +102,7 @@ class ParallelismConfig:
         1  # data parallelism size, DeepSpeed Zero parallelism implementation
     )
     sp_size: int = 1  # sequence parallelism size, Megatron-LM sequence parallelism implementation
+    num_interleaved_stages: int = 1  # Number of virtual pipeline stage, Megatron-LM implementation 
 
 
 # model name and configurations mapping populated from MODEL_CONFIG_DIR_NAME

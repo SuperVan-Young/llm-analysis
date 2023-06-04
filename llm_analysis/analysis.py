@@ -2043,6 +2043,7 @@ class LLMAnalysis:
         activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
         ds_zero: DSZeRO = DSZeRO.NONE,
         layernorm_dtype_bytes: int = BYTES_FP32,
+        microbatch_granularity_estimation: bool = False,
         output_dir: str = None,
     ) -> dict:
         """Training analysis given the configs and inputs.
@@ -2242,26 +2243,23 @@ class LLMAnalysis:
             mp_size * self.get_TFLOPS_per_gpu() * 1e12
         )
 
-        # latency_per_iter = (
-        #     latency_per_micro_batch * gradient_accumulation_steps
-        # )
-
-        # XCH:
-        # Instead of using MFU (originally given by flops_efficiency) to calculate latency_per_iter directly,
-        # We go into detail and use latency breakdown to constitute the complete latency_per_iter.
-        # In this case, flops_efficiency no longer stands for MFU, i.e. it doesn't take transmission overhead into consideration.
-        logger.warning(
-            "Using breakdown latency to calculate latency_per_iter ..."
-        )
-        latency_per_iter, latency_per_iter_breakdown = self.get_latency_per_iter(
-            batch_size_per_gpu,
-            seq_len,
-            gradient_accumulation_steps,
-            num_layers_per_gpu,
-            is_inference=False,
-            activation_recomputation=activation_recomputation,
-            layernorm_dtype_bytes=layernorm_dtype_bytes,
-        )
+        if not microbatch_granularity_estimation:
+            latency_per_iter = (
+                latency_per_micro_batch * gradient_accumulation_steps
+            )
+        else:
+            logger.warning(
+                "Using breakdown latency to calculate latency_per_iter ..."
+            )
+            latency_per_iter, _ = self.get_latency_per_iter(
+                batch_size_per_gpu,
+                seq_len,
+                gradient_accumulation_steps,
+                num_layers_per_gpu,
+                is_inference=False,
+                activation_recomputation=activation_recomputation,
+                layernorm_dtype_bytes=layernorm_dtype_bytes,
+            )
 
 
         logger.info(
@@ -2480,6 +2478,7 @@ def train(
     tp_size: int = 1,
     pp_size: int = 1,
     sp_size: int = 1,
+    num_interleaved_stages: int = 1,
     total_num_gpus: int = None,
     layernorm_dtype_bytes: int = BYTES_FP32,
     achieved_tflops: float = None,
@@ -2549,7 +2548,8 @@ def train(
     gpu_config = get_gpu_config_by_name(gpu_name)
     dtype_config = get_dtype_config_by_name(dtype_name)
     parallel_config = ParallelismConfig(
-        tp_size=tp_size, pp_size=pp_size, dp_size=dp_size, sp_size=sp_size
+        tp_size=tp_size, pp_size=pp_size, dp_size=dp_size, sp_size=sp_size,
+        num_interleaved_stages=num_interleaved_stages,
     )
 
     analysis = LLMAnalysis(
@@ -2575,6 +2575,7 @@ def train(
         ),
         ds_zero=DSZeRO(ds_zero),
         layernorm_dtype_bytes=layernorm_dtype_bytes,
+        microbatch_granularity_estimation=True,
         output_dir=output_dir,
     )
 
