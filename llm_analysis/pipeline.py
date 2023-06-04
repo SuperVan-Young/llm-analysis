@@ -37,27 +37,38 @@ class PipelineAnalyzer():
         self.gradient_accumulation_step = gradient_accumulation_step
         self.num_layers_per_gpu = num_layers_per_gpu
         self.num_interleaved_stages = num_interleaved_stages
-
-        if num_interleaved_stages != 1:
-            logger.critical(
-                "XCH doesn't support virtual stage > 1 yet!"
-            )
-            raise NotImplementedError
         
-        if num_layers_per_gpu % num_interleaved_stages:
-            logger.critical(
-                f"Number of layers per GPU {num_layers_per_gpu}"
-                " cannot be devided by"
-                f" number of interleaved stages {num_interleaved_stages}"
-            )
-            raise RuntimeError
+        if num_interleaved_stages > 1:
+            if gradient_accumulation_step % pp_size:
+                logger.critical(
+                    "To use interleaved pipeline schedule, "
+                    f" number of micro batches {gradient_accumulation_step}"
+                    f" should be divisible by pipeline parallel size {pp_size}."
+                )
+                raise RuntimeError
+            if pp_size == 1 or pp_size == 2:
+                logger.critical(
+                    "Megatron-LM forbids using interleaved pipeline schedule"
+                    f" on too small pipeline parallel size {pp_size}."
+                )
         self.num_layers_per_chunk = num_layers_per_gpu // num_interleaved_stages
 
-    def get_batch_name(self, batch_id: int, device_id: int, is_fwd: bool) -> str:
+        # Simply assume there are more micro batches.
+        self.total_num_microbatches = num_interleaved_stages * gradient_accumulation_step
+
+    def get_batch_name(self, microbatch_id: int, device_id: int, is_fwd: bool) -> str:
         """ Get name of batch instance on given device
         """
         prefix = "fwd" if is_fwd else "bwd"
-        return f"{prefix}_b{batch_id}_d{device_id}"
+        if self.num_interleaved_stages == 1:
+            return f"{prefix}_b{microbatch_id}_d{device_id}"
+        else:
+            microbatch_group_size = self.pp_size * self.num_interleaved_stages
+            microbatch_group_id = microbatch_id // microbatch_group_size
+            microbatch_id_in_group = microbatch_id % microbatch_group_size
+            virtual_pipeline_stage_id = microbatch_group_id // self.pp_size
+            actual_microbatch_id = microbatch_group_id * self.pp_size + (microbatch_id_in_group % self.pp_size)
+            return f"{prefix}_b{actual_microbatch_id}_d{device_id}_v{virtual_pipeline_stage_id}"
 
     def get_latency_exec_model_chunk(self, device_id: int, is_fwd: bool) -> float:
         """ Get the latency of executing a pipeline stage on device #device_id.
@@ -98,8 +109,9 @@ class PipelineAnalyzer():
       
     def build_dependency_graph(self) -> nx.DiGraph:
         """ Build a dependency graph between micro-batches.
-        This includes intra-device dependency induced by instruction sequence,
-        as well as inter-device dependency induced by pipeline parallelism.
+        This includes intra-device dependency induced by microbatch scheduling,
+        as well as inter-device dependency induced by data transmission.
+        XCH referred to Megatron-LM's original code to write this part.
         """
         G = nx.DiGraph()
         G.is_analyzed = False
@@ -109,7 +121,7 @@ class PipelineAnalyzer():
             device_id,
             is_fwd,
         ) in product(
-            range(self.gradient_accumulation_step),
+            range(self.total_num_microbatches),
             range(self.pp_size),
             (True, False),
         ):
@@ -122,7 +134,7 @@ class PipelineAnalyzer():
             )
 
         # inter-node dependency
-        for batch_id in range(self.gradient_accumulation_step):
+        for batch_id in range(self.total_num_microbatches):
             fwd_transmission_chain = [
                 self.get_batch_name(batch_id, device_id, is_fwd=True)
                 for device_id in range(self.pp_size)
@@ -136,12 +148,11 @@ class PipelineAnalyzer():
             self.add_dependency_chain(G, bwd_transmission_chain, self.latency_bwd_pp_comm)
 
         # intra-node dependency
-        # For now we only consider non-interleaving scenario
         
         # The last device could start 1F1B schedule directly
         output_device_id = self.pp_size - 1
         output_control_chain = []
-        for batch_id in range(self.gradient_accumulation_step):
+        for batch_id in range(self.total_num_microbatches):
             for is_fwd in (True, False):
                 output_control_chain.append(
                     self.get_batch_name(batch_id, output_device_id, is_fwd)
@@ -153,8 +164,8 @@ class PipelineAnalyzer():
 
             nxt_fwd_batch_id = 0
             nxt_bwd_batch_id = 0
-            num_fwd_batches = self.gradient_accumulation_step
-            num_bwd_batches = self.gradient_accumulation_step
+            num_fwd_batches = self.total_num_microbatches
+            num_bwd_batches = self.total_num_microbatches
 
             def add_fwd_batch_to_control_chain():
                 nonlocal nxt_fwd_batch_id
@@ -172,27 +183,61 @@ class PipelineAnalyzer():
                 )
                 nxt_bwd_batch_id += 1
 
-            # Unlike the graph in Megatron-LM, we count the first fwd batch
-            # in the steady state into startup state.
-            num_startup_fwd_batches = min(
-                self.pp_size,
-                self.gradient_accumulation_step,
-                2 * (self.pp_size - device_id) - 1,
-            )
-            for fwd_batch_id in range(num_startup_fwd_batches):
-                add_fwd_batch_to_control_chain()
-            while True:
-                try:
-                    add_bwd_batch_to_control_chain()
+            if self.num_interleaved_stages == 1:
+                # warmup stage
+                num_warmup_fwd_batches = (
+                    self.pp_size - device_id - 1
+                )
+                num_warmup_fwd_batches = min(
+                    num_warmup_fwd_batches,
+                    self.total_num_microbatches,
+                )
+                for fwd_batch_id in range(num_warmup_fwd_batches):
                     add_fwd_batch_to_control_chain()
-                except AssertionError:
-                    break
-            while True:
-                try:
-                    add_bwd_batch_to_control_chain()
-                except AssertionError:
-                    break
-            assert len(control_chain) == 2 * self.gradient_accumulation_step
+                # 1F1B stage
+                while True:
+                    try:
+                        add_bwd_batch_to_control_chain()
+                        add_fwd_batch_to_control_chain()
+                    except AssertionError:
+                        break
+                # cooldown stage
+                while True:
+                    try:
+                        add_bwd_batch_to_control_chain()
+                    except AssertionError:
+                        break
+            else:
+                # warmup stage
+                if self.total_num_microbatches == self.pp_size:
+                    num_warmup_fwd_batches = self.total_num_microbatches
+                else:
+                    num_warmup_fwd_batches = \
+                        (self.pp_size - 1 - device_id) * 2
+                    num_warmup_fwd_batches += (
+                        self.num_interleaved_stages - 1 ) * self.pp_size
+                    num_warmup_fwd_batches = min(
+                        num_warmup_fwd_batches,
+                        self.total_num_microbatches,
+                    )
+                for fwd_batch_id in range(num_warmup_fwd_batches):
+                    add_fwd_batch_to_control_chain()
+                # 1F1B stage
+                while True:
+                    try:
+                        add_bwd_batch_to_control_chain()
+                        add_fwd_batch_to_control_chain()
+                    except AssertionError:
+                        break
+                # cooldown stage
+                while True:
+                    try:
+                        add_bwd_batch_to_control_chain()
+                    except AssertionError:
+                        break
+
+            # each device should have a complete dependency sequence
+            assert len(control_chain) == 2 * self.total_num_microbatches
 
             self.add_dependency_chain(G, control_chain, 0)
         
@@ -239,9 +284,9 @@ class PipelineAnalyzer():
                 break
         critical_path = reversed(reversed_critical_path)
 
-        logger.warning("Critical Path:")
+        logger.info("Critical Path:")
         for n in critical_path:
-            logger.warning(
+            logger.info(
                 f"{n} : {G.nodes[n]['start_time']} ~ {G.nodes[n]['end_time']}"
             )
 
