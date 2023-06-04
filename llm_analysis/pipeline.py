@@ -38,12 +38,6 @@ class PipelineAnalyzer():
         self.num_layers_per_gpu = num_layers_per_gpu
         self.num_interleaved_stages = num_interleaved_stages
 
-        if pp_size == 1:
-            logger.critical(
-                "Pipeline analyzer doesn't allow pp_size == 1!"
-            )
-            raise RuntimeError
-
         if num_interleaved_stages != 1:
             logger.critical(
                 "XCH doesn't support virtual stage > 1 yet!"
@@ -59,14 +53,6 @@ class PipelineAnalyzer():
             raise RuntimeError
         self.num_layers_per_chunk = num_layers_per_gpu // num_interleaved_stages
 
-        if gradient_accumulation_step < pp_size:
-            logger.critical(
-                f"Pipeline has {pp_size} stages"
-                " and cannot be fully filled with"
-                f" {gradient_accumulation_step} accumulation steps."
-            )
-            raise RuntimeError
-
     def get_batch_name(self, batch_id: int, device_id: int, is_fwd: bool) -> str:
         """ Get name of batch instance on given device
         """
@@ -75,6 +61,7 @@ class PipelineAnalyzer():
 
     def get_latency_exec_model_chunk(self, device_id: int, is_fwd: bool) -> float:
         """ Get the latency of executing a pipeline stage on device #device_id.
+        If pp_size == 1, this considers both input and output embed.
         """
         if is_fwd:
             latency = self.latency_fwd_per_layer * self.num_layers_per_chunk
@@ -162,36 +149,50 @@ class PipelineAnalyzer():
         
         for device_id in range(self.pp_size - 1):
             control_chain = []
-            step_diff = self.pp_size - (device_id + 1)
-            
-            # start with pp_size fwd micro batches
-            for fwd_batch_id in range(self.pp_size):
+
+            nxt_fwd_batch_id = 0
+            nxt_bwd_batch_id = 0
+            num_fwd_batches = self.gradient_accumulation_step
+            num_bwd_batches = self.gradient_accumulation_step
+
+            def add_fwd_batch_to_control_chain():
+                nonlocal nxt_fwd_batch_id
+                assert nxt_fwd_batch_id < num_fwd_batches
                 control_chain.append(
-                    self.get_batch_name(fwd_batch_id, device_id, True)
+                    self.get_batch_name(nxt_fwd_batch_id, device_id, is_fwd=True)
                 )
-            # then several bwd micro batches
-            for bwd_batch_id in range(device_id + 1):
+                nxt_fwd_batch_id += 1
+
+            def add_bwd_batch_to_control_chain():
+                nonlocal nxt_bwd_batch_id
+                assert nxt_bwd_batch_id < num_bwd_batches
                 control_chain.append(
-                    self.get_batch_name(bwd_batch_id, device_id, False)
+                    self.get_batch_name(nxt_bwd_batch_id, device_id, is_fwd=False)
                 )
-            # then 1F1B schedule
-            for fwd_batch_id in range(self.pp_size, self.gradient_accumulation_step):
-                control_chain.append(
-                    self.get_batch_name(fwd_batch_id, device_id, True)
-                )
-                bwd_batch_id = fwd_batch_id - step_diff
-                control_chain.append(
-                    self.get_batch_name(bwd_batch_id, device_id, False)
-                )
-            # then wrap up with remaining bwd micro batches
-            for bwd_batch_id in range(
-                self.gradient_accumulation_step - step_diff, 
-                self.gradient_accumulation_step):
-                control_chain.append(
-                    self.get_batch_name(bwd_batch_id, device_id, False)
-                )
-            
+                nxt_bwd_batch_id += 1
+
+            # Unlike the graph in Megatron-LM, we count the first fwd batch
+            # in the steady state into startup state.
+            num_startup_fwd_batches = min(
+                self.pp_size,
+                self.gradient_accumulation_step,
+                2 * (self.pp_size - device_id) - 1,
+            )
+            for fwd_batch_id in range(num_startup_fwd_batches):
+                add_fwd_batch_to_control_chain()
+            while True:
+                try:
+                    add_bwd_batch_to_control_chain()
+                    add_fwd_batch_to_control_chain()
+                except AssertionError:
+                    break
+            while True:
+                try:
+                    add_bwd_batch_to_control_chain()
+                except AssertionError:
+                    break
             assert len(control_chain) == 2 * self.gradient_accumulation_step
+
             self.add_dependency_chain(G, control_chain, 0)
         
         return G
@@ -203,9 +204,9 @@ class PipelineAnalyzer():
             udata = G.nodes[u]
             udata['end_time'] = udata['start_time'] + udata['latency']
             for v in G.successors(u):
-                edata = G.edges[u][v]
+                edata = G.edges[(u, v)]
                 vdata = G.nodes[v]
-                new_start_time = udata['end'] + edata['latency']
+                new_start_time = udata['end_time'] + edata['latency']
                 if new_start_time > vdata['start_time']:
                     vdata['critical_path_pred'] = u
                     vdata['start_time'] = new_start_time
@@ -252,7 +253,7 @@ class PipelineAnalyzer():
                 (self.latency_fwd_per_layer + self.latency_bwd_per_layer)
                 * self.num_layers_per_gpu
                 * self.gradient_accumulation_step
-            ), # here we ignore embedding for simplicity
+            ), # here we ignore input/output embedding for simplicity
             'pp_comm': (
                 (self.latency_fwd_pp_comm + self.latency_bwd_pp_comm)
                 * (self.pp_size - 1)

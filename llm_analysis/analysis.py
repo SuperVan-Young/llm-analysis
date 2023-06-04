@@ -1312,7 +1312,8 @@ class LLMAnalysis:
             )
         )
 
-        latency_bwd_per_layer_tp_comm = self.get_latency_bwd_per_layer_tp_comm(
+        # The same with fwd, I don't feel like wrapping it.
+        latency_bwd_per_layer_tp_comm = self.get_latency_fwd_per_layer_tp_comm(
             batch_size,
             seq_len,
             self.dtype_config.activation_bits / BITS_PER_BYTE,
@@ -1409,11 +1410,11 @@ class LLMAnalysis:
             * (dp_size - 1)
             / dp_size
         )
-        latency_per_cc = {
+        latency_per_cc = (
             elems_per_cc
             * dtype_bytes
             / (self.gpu_config.inter_node_bandwidth_in_GB_per_sec * 10**9)
-        }
+        )
         return latency_per_cc
 
     def get_latency_embed_sync(
@@ -1471,7 +1472,7 @@ class LLMAnalysis:
         Returns:
             tuple: a tuple of the latency in seconds for a complete iteration of the transformer and its breakdown dict
         """
-        if not is_inference:
+        if is_inference:
             logger.critical(
                 "XCH hasn't considered inference yet!"
             )
@@ -2238,7 +2239,7 @@ class LLMAnalysis:
         logger.warning(
             "Using breakdown latency to calculate latency_per_iter ..."
         )
-        latency_per_iter = self.get_latency_per_iter(
+        latency_per_iter, latency_per_iter_breakdown = self.get_latency_per_iter(
             batch_size_per_gpu,
             seq_len,
             gradient_accumulation_steps,

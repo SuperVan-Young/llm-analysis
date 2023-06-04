@@ -52,7 +52,8 @@ def test_training_megatron_lm_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -101,7 +102,8 @@ def test_training_megatron_lm_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -143,7 +145,8 @@ def test_training_megatron_lm_3():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -188,7 +191,8 @@ def test_training_zero3_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -231,7 +235,8 @@ def test_training_zero3_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -274,7 +279,8 @@ def test_training_mt_nlg_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
@@ -315,7 +321,8 @@ def test_training_mt_nlg_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        achieved_tflops=achieved_tflops,
+        # achieved_tflops=achieved_tflops,
+        flops_efficiency=1,
     )
 
     summary_dict = analysis.training(
