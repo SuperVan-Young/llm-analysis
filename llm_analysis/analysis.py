@@ -1472,6 +1472,12 @@ class LLMAnalysis:
         Returns:
             tuple: a tuple of the latency in seconds for a complete iteration of the transformer and its breakdown dict
         """
+        logger.warning(
+            "We use ideal flops efficiency in calculating latency_per_iter."
+        )
+        self.flops_efficiency_backup = self.flops_efficiency
+        self.flops_efficiency = 1
+
         if is_inference:
             logger.critical(
                 "XCH hasn't considered inference yet!"
@@ -1541,6 +1547,8 @@ class LLMAnalysis:
         )
 
         pipeline_latency, pipeline_latency_breakdown = pipeline_analyzer.get_pipeline_latency()
+
+        self.flops_efficiency = self.flops_efficiency_backup
 
         return (
             pipeline_latency,
@@ -2153,6 +2161,12 @@ class LLMAnalysis:
             gradient_accumulation_steps,
             global_batch_size,
         )
+        logger.warning(
+            f"max_batch_size_per_gpu: {max_batch_size_per_gpu} \n"
+            f"batch_size_per_gpu: {batch_size_per_gpu} \n"
+            f"gradient_accumulation_steps: {gradient_accumulation_steps} \n"
+            f"global_batch_size: {global_batch_size} \n"
+        )
 
         activation_memory_per_gpu = (
             self.get_memory_activation_per_layer(
@@ -2304,6 +2318,11 @@ class LLMAnalysis:
 
         else:
             total_training_latency = None
+
+        logger.critical(
+            "total_training_latency: "
+            f"{total_training_latency / 3600 / 24:.2f} day"
+        )
 
         gpu_hours = (
             total_training_latency * total_num_gpus / 3600

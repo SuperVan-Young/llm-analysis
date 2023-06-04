@@ -36,7 +36,11 @@ def test_training_megatron_lm_1():
     pp_size = 12
     total_num_gpus = 384
     dp_size = total_num_gpus // (tp_size * pp_size)
-    batch_size_per_gpu = 8
+    # batch_size_per_gpu = 8
+    
+    # XCH double-checked original paper
+    batch_size_per_gpu = 1
+    global_batch_size = 1536
 
     achieved_tflops = 153  # reported in the paper
 
@@ -52,12 +56,12 @@ def test_training_megatron_lm_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
         batch_size_per_gpu=batch_size_per_gpu,
+        global_batch_size=global_batch_size,
         total_num_tokens=total_num_tokens,
         activation_recomputation=activation_recomputation,
     )
@@ -102,8 +106,7 @@ def test_training_megatron_lm_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
@@ -145,8 +148,7 @@ def test_training_megatron_lm_3():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
@@ -191,8 +193,7 @@ def test_training_zero3_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
@@ -235,8 +236,7 @@ def test_training_zero3_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
@@ -279,8 +279,7 @@ def test_training_mt_nlg_1():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(
@@ -321,8 +320,7 @@ def test_training_mt_nlg_2():
         gpu_config,
         dtype_config,
         parallel_config,
-        # achieved_tflops=achieved_tflops,
-        flops_efficiency=1,
+        achieved_tflops=achieved_tflops,
     )
 
     summary_dict = analysis.training(

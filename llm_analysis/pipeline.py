@@ -67,6 +67,7 @@ class PipelineAnalyzer():
             latency = self.latency_fwd_per_layer * self.num_layers_per_chunk
         else:
             latency = self.latency_bwd_per_layer * self.num_layers_per_chunk
+            latency += self.latency_recompute_per_layer * self.num_layers_per_chunk
 
         if device_id == 0:
             if is_fwd:
@@ -219,13 +220,32 @@ class PipelineAnalyzer():
         G = graph
         assert G.is_analyzed
 
-        max_end_time = 0
+        last_node = self.get_batch_name(0, 0, True)
         for n, ndata in G.nodes(data=True):
-            max_end_time = max(
-                max_end_time,
-                ndata['end_time'],
+            last_end_time = G.nodes[last_node]['end_time']
+            new_end_time = ndata['end_time']
+            if new_end_time > last_end_time:
+                last_node = n
+
+        # debug critical path
+        reversed_critical_path = []
+        cur_node = last_node
+        while True:
+            reversed_critical_path.append(cur_node)
+            pred_node = G.nodes[cur_node]['critical_path_pred']
+            if pred_node:
+                cur_node = pred_node
+            else:
+                break
+        critical_path = reversed(reversed_critical_path)
+
+        logger.warning("Critical Path:")
+        for n in critical_path:
+            logger.warning(
+                f"{n} : {G.nodes[n]['start_time']} ~ {G.nodes[n]['end_time']}"
             )
-        return max_end_time
+
+        return G.nodes[last_node]['end_time']
     
     def get_pipeline_latency(self) -> tuple:
         """ Get pipeline latency and its breakdown.
@@ -250,7 +270,7 @@ class PipelineAnalyzer():
         )
         breakdown = {
             'compute': (
-                (self.latency_fwd_per_layer + self.latency_bwd_per_layer)
+                (self.latency_fwd_per_layer + self.latency_bwd_per_layer + self.latency_recompute_per_layer)
                 * self.num_layers_per_gpu
                 * self.gradient_accumulation_step
             ), # here we ignore input/output embedding for simplicity
@@ -261,6 +281,14 @@ class PipelineAnalyzer():
             'dp_comm': self.latency_dp_comm,
             'embed_sync': self.latency_embed_sync,
         }
+
+        logger.warning(
+            "Pipeline analyzer latency breakdown:\n"
+            f" compute: {breakdown['compute'] / total_latency :.2%}\n"
+            f" pp_comm: {breakdown['pp_comm'] / total_latency :.2%}\n"
+            f" dp_comm: {breakdown['dp_comm'] / total_latency :.2%}\n"
+            f" embed_sync: {breakdown['embed_sync'] / total_latency :.2%}\n"
+        )
 
         return total_latency, breakdown
     
