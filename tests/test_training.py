@@ -37,10 +37,12 @@ def test_training_megatron_lm_1():
     total_num_gpus = 384
     dp_size = total_num_gpus // (tp_size * pp_size)
     # batch_size_per_gpu = 8
+    # num_interleaved_stages = 1
     
     # XCH double-checked original paper
     batch_size_per_gpu = 1
     global_batch_size = 1536
+    num_interleaved_stages = 2
 
     achieved_tflops = 153  # reported in the paper
 
@@ -48,7 +50,8 @@ def test_training_megatron_lm_1():
     gpu_config = get_gpu_config_by_name(gpu_name)
     dtype_config = get_dtype_config_by_name(dtype_name)
     parallel_config = ParallelismConfig(
-        tp_size=tp_size, pp_size=pp_size, dp_size=dp_size
+        tp_size=tp_size, pp_size=pp_size, dp_size=dp_size,
+        num_interleaved_stages=num_interleaved_stages,
     )
 
     analysis = LLMAnalysis(
@@ -64,6 +67,7 @@ def test_training_megatron_lm_1():
         global_batch_size=global_batch_size,
         total_num_tokens=total_num_tokens,
         activation_recomputation=activation_recomputation,
+        microbatch_granularity_estimation=True,
     )
 
     assert within_range(
