@@ -1530,6 +1530,7 @@ class LLMAnalysis:
         latency_embed_sync = self.get_latency_embed_sync(self.dtype_config.embedding_bits / BITS_PER_BYTE)
 
         pp_size = self.parallelism_config.pp_size
+        num_interleaved_stages = self.parallelism_config.num_interleaved_stages
         pipeline_analyzer = PipelineAnalyzer(
             latency_fwd_per_layer,
             latency_bwd_per_layer,
@@ -1543,7 +1544,7 @@ class LLMAnalysis:
             pp_size,
             gradient_accumulation_step,
             num_layers_per_gpu,
-            num_interleaved_stages = 1,
+            num_interleaved_stages,
         )
 
         pipeline_latency, pipeline_latency_breakdown = pipeline_analyzer.get_pipeline_latency()
@@ -1554,6 +1555,72 @@ class LLMAnalysis:
             pipeline_latency,
             pipeline_latency_breakdown,
         )
+
+    def get_ideal_TFLOPS_per_gpu(self) -> float:
+        wbits = self.dtype_config.weight_bits
+        abits = self.dtype_config.activation_bits
+        higher_bits = max(
+            wbits, abits
+        )  # gemm dtype/TFLOPS is determined by the higher bits
+        if higher_bits == 4:
+            gemm_TFOPS = self.gpu_config.peak_i4_TFLOPS
+        elif higher_bits == 8:
+            gemm_TFOPS = self.gpu_config.peak_i8_TFLOPS
+        else:
+            assert (
+                higher_bits == 16
+            ), "weight_bits and activation_bits must be 4, 8, or 16"
+            gemm_TFOPS = self.gpu_config.peak_fp16_TFLOPS
+        return gemm_TFOPS
+
+    def get_model_flops_utilization(
+        self,
+        batch_size: int,
+        seq_len: int,
+        gradient_accumulation_step: int,
+        num_layers_per_gpu: int,
+        activation_recomputation: ActivationRecomputation = ActivationRecomputation.NONE,
+        layernorm_dtype_bytes: int = BYTES_FP32,
+    ) -> float:
+        """ Estimate MFU using fine-grained latency_per_iter and total FLOPs.
+        """
+        num_flops_fwd_total = self.get_num_flops_fwd_total(
+            batch_size, seq_len
+        )
+        num_flops_bwd_total = self.get_num_flops_bwd_total(
+            batch_size, seq_len
+        )
+        num_flops_total_per_micro_batch = (
+            num_flops_fwd_total + num_flops_bwd_total
+        )
+
+        is_inference = False
+        latency_per_iter, _ = self.get_latency_per_iter(
+            batch_size,
+            seq_len,
+            gradient_accumulation_step,
+            num_layers_per_gpu,
+            is_inference,
+            activation_recomputation,
+            layernorm_dtype_bytes,
+        )
+
+        achieved_flops = (
+            num_flops_total_per_micro_batch
+            * gradient_accumulation_step
+            / latency_per_iter
+        )
+        mp_size = (
+            self.parallelism_config.pp_size
+            * self.parallelism_config.tp_size
+        )
+        model_flops_utilization = (
+            achieved_flops
+            / (mp_size * self.get_ideal_TFLOPS_per_gpu() * 1e12)
+        )
+        assert model_flops_utilization <= 1, f"MFU = {model_flops_utilization:.2%} > 1"
+
+        return model_flops_utilization
 
     def print_config(self, name="Training Configs") -> None:
         config_str = f"\n{name.center(PRINT_LINE_WIDTH, '-')}\n"
@@ -2260,7 +2327,17 @@ class LLMAnalysis:
                 activation_recomputation=activation_recomputation,
                 layernorm_dtype_bytes=layernorm_dtype_bytes,
             )
-
+            model_flops_utilization = self.get_model_flops_utilization(
+                batch_size_per_gpu,
+                seq_len,
+                gradient_accumulation_steps,
+                num_layers_per_gpu,
+                activation_recomputation=activation_recomputation,
+                layernorm_dtype_bytes=layernorm_dtype_bytes,
+            )
+            logger.warning(
+                f"MFU = {model_flops_utilization:.2%}"
+            )
 
         logger.info(
             "latency_per_micro_batch:"
@@ -2575,7 +2652,6 @@ def train(
         ),
         ds_zero=DSZeRO(ds_zero),
         layernorm_dtype_bytes=layernorm_dtype_bytes,
-        microbatch_granularity_estimation=True,
         output_dir=output_dir,
     )
 
